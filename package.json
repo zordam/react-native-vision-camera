@@ -155,7 +155,7 @@
       [
         "typescript",
         {
-          "project": "tsconfig.json"
+          "project": "./tsconfig.json"
         }
       ]
     ]
