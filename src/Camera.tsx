@@ -473,6 +473,7 @@ export class Camera extends React.PureComponent<CameraProps> {
     // We remove the big `device` object from the props because we only need to pass `cameraId` to native.
     const { device, frameProcessor, frameProcessorFps, ...props } = this.props;
     return (
+      // @ts-ignore
       <NativeCameraView
         {...props}
         frameProcessorFps={frameProcessorFps === 'auto' ? -1 : frameProcessorFps}
