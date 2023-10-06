@@ -8,15 +8,15 @@
 
 #pragma once
 
-#import <CoreMedia/CMSampleBuffer.h>
 #import <Foundation/Foundation.h>
+#import <CoreMedia/CMSampleBuffer.h>
 #import <UIKit/UIImage.h>
 
 @interface Frame : NSObject
 
-- (instancetype _Nonnull)initWithBuffer:(CMSampleBufferRef _Nonnull)buffer orientation:(UIImageOrientation)orientation;
+- (instancetype) initWithBuffer:(CMSampleBufferRef)buffer orientation:(UIImageOrientation)orientation;
 
-@property(nonatomic, readonly) CMSampleBufferRef _Nonnull buffer;
-@property(nonatomic, readonly) UIImageOrientation orientation;
+@property (nonatomic, readonly) CMSampleBufferRef buffer;
+@property (nonatomic, readonly) UIImageOrientation orientation;
 
 @end

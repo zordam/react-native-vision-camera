@@ -23,55 +23,50 @@ private let propsThatRequireReconfiguration = ["cameraId",
                                                "enableDepthData",
                                                "enableHighQualityPhotos",
                                                "enablePortraitEffectsMatteDelivery",
+                                               "preset",
                                                "photo",
                                                "video",
-                                               "enableFrameProcessor",
-                                               "hdr",
-                                               "pixelFormat",
-                                               "codeScannerOptions"]
+                                               "enableFrameProcessor"]
 private let propsThatRequireDeviceReconfiguration = ["fps",
-                                                     "lowLightBoost"]
+                                                     "hdr",
+                                                     "lowLightBoost",
+                                                     "colorSpace"]
 
 // MARK: - CameraView
 
 public final class CameraView: UIView {
   // pragma MARK: React Properties
+
+  // pragma MARK: Exported Properties
   // props that require reconfiguring
   @objc var cameraId: NSString?
   @objc var enableDepthData = false
   @objc var enableHighQualityPhotos: NSNumber? // nullable bool
   @objc var enablePortraitEffectsMatteDelivery = false
-  @objc var enableBufferCompression = false
+  @objc var preset: String?
   // use cases
   @objc var photo: NSNumber? // nullable bool
   @objc var video: NSNumber? // nullable bool
   @objc var audio: NSNumber? // nullable bool
   @objc var enableFrameProcessor = false
-  @objc var codeScannerOptions: NSDictionary?
-  @objc var pixelFormat: NSString?
   // props that require format reconfiguring
   @objc var format: NSDictionary?
   @objc var fps: NSNumber?
+  @objc var frameProcessorFps: NSNumber = -1.0 // "auto"
   @objc var hdr: NSNumber? // nullable bool
   @objc var lowLightBoost: NSNumber? // nullable bool
+  @objc var colorSpace: NSString?
   @objc var orientation: NSString?
   // other props
   @objc var isActive = false
   @objc var torch = "off"
   @objc var zoom: NSNumber = 1.0 // in "factor"
-  @objc var enableFpsGraph = false
   @objc var videoStabilizationMode: NSString?
-  @objc var resizeMode: NSString = "cover" {
-    didSet {
-      previewView.resizeMode = ResizeMode(fromTypeScriptUnion: resizeMode as String)
-    }
-  }
-
   // events
   @objc var onInitialized: RCTDirectEventBlock?
   @objc var onError: RCTDirectEventBlock?
+  @objc var onFrameProcessorPerformanceSuggestionAvailable: RCTDirectEventBlock?
   @objc var onViewReady: RCTDirectEventBlock?
-  @objc var onCodeScanned: RCTDirectEventBlock?
   // zoom
   @objc var enableZoomGesture = false {
     didSet {
@@ -84,43 +79,60 @@ public final class CameraView: UIView {
   }
 
   // pragma MARK: Internal Properties
-  var isMounted = false
-  var isReady = false
+  internal var isMounted = false
+  internal var isReady = false
   // Capture Session
-  let captureSession = AVCaptureSession()
-  let audioCaptureSession = AVCaptureSession()
-  // Inputs & Outputs
-  var videoDeviceInput: AVCaptureDeviceInput?
-  var audioDeviceInput: AVCaptureDeviceInput?
-  var photoOutput: AVCapturePhotoOutput?
-  var videoOutput: AVCaptureVideoDataOutput?
-  var audioOutput: AVCaptureAudioDataOutput?
-  // CameraView+RecordView (+ Frame Processor)
-  var isRecording = false
-  var recordingSession: RecordingSession?
-  #if VISION_CAMERA_ENABLE_FRAME_PROCESSORS
-    @objc public var frameProcessor: FrameProcessor?
-  #endif
+  internal let captureSession = AVCaptureSession()
+  internal let audioCaptureSession = AVCaptureSession()
+  // Inputs
+  internal var videoDeviceInput: AVCaptureDeviceInput?
+  internal var audioDeviceInput: AVCaptureDeviceInput?
+  internal var photoOutput: AVCapturePhotoOutput?
+  internal var videoOutput: AVCaptureVideoDataOutput?
+  internal var audioOutput: AVCaptureAudioDataOutput?
+  // CameraView+RecordView (+ FrameProcessorDelegate.mm)
+  internal var isRecording = false
+  internal var recordingSession: RecordingSession?
+  @objc public var frameProcessorCallback: FrameProcessorCallback?
+  internal var lastFrameProcessorCall = DispatchTime.now().uptimeNanoseconds
+  // CameraView+TakePhoto
+  internal var photoCaptureDelegates: [PhotoCaptureDelegate] = []
   // CameraView+Zoom
-  var pinchGestureRecognizer: UIPinchGestureRecognizer?
-  var pinchScaleOffset: CGFloat = 1.0
+  internal var pinchGestureRecognizer: UIPinchGestureRecognizer?
+  internal var pinchScaleOffset: CGFloat = 1.0
 
-  var previewView: PreviewView
-  #if DEBUG
-    var fpsGraph: RCTFPSGraph?
-  #endif
+  internal let cameraQueue = CameraQueues.cameraQueue
+  internal let videoQueue = CameraQueues.videoQueue
+  internal let audioQueue = CameraQueues.audioQueue
+
+  /// Specifies whether the frameProcessor() function is currently executing. used to drop late frames.
+  internal var isRunningFrameProcessor = false
+  internal let frameProcessorPerformanceDataCollector = FrameProcessorPerformanceDataCollector()
+  internal var actualFrameProcessorFps = 30.0
+  internal var lastSuggestedFrameProcessorFps = 0.0
+  internal var lastFrameProcessorPerformanceEvaluation = DispatchTime.now()
 
   /// Returns whether the AVCaptureSession is currently running (reflected by isActive)
   var isRunning: Bool {
     return captureSession.isRunning
   }
 
+  /// Convenience wrapper to get layer as its statically known type.
+  var videoPreviewLayer: AVCaptureVideoPreviewLayer {
+    // swiftlint:disable force_cast
+    return layer as! AVCaptureVideoPreviewLayer
+  }
+
+  override public class var layerClass: AnyClass {
+    return AVCaptureVideoPreviewLayer.self
+  }
+
   // pragma MARK: Setup
   override public init(frame: CGRect) {
-    previewView = PreviewView(frame: frame, session: captureSession)
     super.init(frame: frame)
-
-    addSubview(previewView)
+    videoPreviewLayer.session = captureSession
+    videoPreviewLayer.videoGravity = .resizeAspectFill
+    videoPreviewLayer.frame = layer.bounds
 
     NotificationCenter.default.addObserver(self,
                                            selector: #selector(sessionRuntimeError),
@@ -134,6 +146,10 @@ public final class CameraView: UIView {
                                            selector: #selector(audioSessionInterrupted),
                                            name: AVAudioSession.interruptionNotification,
                                            object: AVAudioSession.sharedInstance)
+    NotificationCenter.default.addObserver(self,
+                                           selector: #selector(onOrientationChanged),
+                                           name: UIDevice.orientationDidChangeNotification,
+                                           object: nil)
   }
 
   @available(*, unavailable)
@@ -151,22 +167,20 @@ public final class CameraView: UIView {
     NotificationCenter.default.removeObserver(self,
                                               name: AVAudioSession.interruptionNotification,
                                               object: AVAudioSession.sharedInstance)
+    NotificationCenter.default.removeObserver(self,
+                                              name: UIDevice.orientationDidChangeNotification,
+                                              object: nil)
   }
 
   override public func willMove(toSuperview newSuperview: UIView?) {
     super.willMove(toSuperview: newSuperview)
-
-    if newSuperview != nil {
-      if !isMounted {
-        isMounted = true
-        onViewReady?(nil)
+    if !isMounted {
+      isMounted = true
+      guard let onViewReady = onViewReady else {
+        return
       }
+      onViewReady(nil)
     }
-  }
-
-  override public func layoutSubviews() {
-    previewView.frame = frame
-    previewView.bounds = bounds
   }
 
   // pragma MARK: Props updating
@@ -183,13 +197,7 @@ public final class CameraView: UIView {
     let shouldUpdateTorch = willReconfigure || changedProps.contains("torch") || shouldCheckActive
     let shouldUpdateZoom = willReconfigure || changedProps.contains("zoom") || shouldCheckActive
     let shouldUpdateVideoStabilization = willReconfigure || changedProps.contains("videoStabilizationMode")
-    let shouldUpdateOrientation = willReconfigure || changedProps.contains("orientation")
-
-    if changedProps.contains("enableFpsGraph") {
-      DispatchQueue.main.async {
-        self.setupFpsGraph()
-      }
-    }
+    let shouldUpdateOrientation = changedProps.contains("orientation")
 
     if shouldReconfigure ||
       shouldReconfigureAudioSession ||
@@ -200,8 +208,7 @@ public final class CameraView: UIView {
       shouldReconfigureDevice ||
       shouldUpdateVideoStabilization ||
       shouldUpdateOrientation {
-      CameraQueues.cameraQueue.async {
-        // Video Configuration
+      cameraQueue.async {
         if shouldReconfigure {
           self.configureCaptureSession()
         }
@@ -239,7 +246,7 @@ public final class CameraView: UIView {
 
         // This is a wack workaround, but if I immediately set torch mode after `startRunning()`, the session isn't quite ready yet and will ignore torch.
         if shouldUpdateTorch {
-          CameraQueues.cameraQueue.asyncAfter(deadline: .now() + 0.1) {
+          self.cameraQueue.asyncAfter(deadline: .now() + 0.1) {
             self.setTorchMode(self.torch)
           }
         }
@@ -247,29 +254,71 @@ public final class CameraView: UIView {
 
       // Audio Configuration
       if shouldReconfigureAudioSession {
-        CameraQueues.audioQueue.async {
+        audioQueue.async {
           self.configureAudioSession()
         }
       }
     }
+
+    // Frame Processor FPS Configuration
+    if changedProps.contains("frameProcessorFps") {
+      if frameProcessorFps.doubleValue == -1 {
+        // "auto"
+        actualFrameProcessorFps = 30.0
+      } else {
+        actualFrameProcessorFps = frameProcessorFps.doubleValue
+      }
+      lastFrameProcessorPerformanceEvaluation = DispatchTime.now()
+      frameProcessorPerformanceDataCollector.clear()
+    }
   }
 
-  func setupFpsGraph() {
-    #if DEBUG
-      if enableFpsGraph {
-        if fpsGraph != nil { return }
-        fpsGraph = RCTFPSGraph(frame: CGRect(x: 10, y: 54, width: 75, height: 45), color: .red)
-        fpsGraph!.layer.zPosition = 9999.0
-        addSubview(fpsGraph!)
+  internal final func setTorchMode(_ torchMode: String) {
+    guard let device = videoDeviceInput?.device else {
+      invokeOnError(.session(.cameraNotReady))
+      return
+    }
+    guard var torchMode = AVCaptureDevice.TorchMode(withString: torchMode) else {
+      invokeOnError(.parameter(.invalid(unionName: "TorchMode", receivedValue: torch)))
+      return
+    }
+    if !captureSession.isRunning {
+      torchMode = .off
+    }
+    if device.torchMode == torchMode {
+      // no need to run the whole lock/unlock bs
+      return
+    }
+    if !device.hasTorch || !device.isTorchAvailable {
+      if torchMode == .off {
+        // ignore it, when it's off and not supported, it's off.
+        return
       } else {
-        fpsGraph?.removeFromSuperview()
-        fpsGraph = nil
+        // torch mode is .auto or .on, but no torch is available.
+        invokeOnError(.device(.torchUnavailable))
+        return
       }
-    #endif
+    }
+    do {
+      try device.lockForConfiguration()
+      device.torchMode = torchMode
+      if torchMode == .on {
+        try device.setTorchModeOn(level: 1.0)
+      }
+      device.unlockForConfiguration()
+    } catch let error as NSError {
+      invokeOnError(.device(.configureError), cause: error)
+      return
+    }
+  }
+
+  @objc
+  func onOrientationChanged() {
+    updateOrientation()
   }
 
   // pragma MARK: Event Invokers
-  final func invokeOnError(_ error: CameraError, cause: NSError? = nil) {
+  internal final func invokeOnError(_ error: CameraError, cause: NSError? = nil) {
     ReactLogger.log(level: .error, message: "Invoking onError(): \(error.message)")
     guard let onError = onError else { return }
 
@@ -289,9 +338,23 @@ public final class CameraView: UIView {
     ])
   }
 
-  final func invokeOnInitialized() {
+  internal final func invokeOnInitialized() {
     ReactLogger.log(level: .info, message: "Camera initialized!")
     guard let onInitialized = onInitialized else { return }
     onInitialized([String: Any]())
+  }
+
+  internal final func invokeOnFrameProcessorPerformanceSuggestionAvailable(currentFps: Double, suggestedFps: Double) {
+    ReactLogger.log(level: .info, message: "Frame Processor Performance Suggestion available!")
+    guard let onFrameProcessorPerformanceSuggestionAvailable = onFrameProcessorPerformanceSuggestionAvailable else { return }
+
+    if lastSuggestedFrameProcessorFps == suggestedFps { return }
+    if suggestedFps == currentFps { return }
+
+    onFrameProcessorPerformanceSuggestionAvailable([
+      "type": suggestedFps > currentFps ? "can-use-higher-fps" : "should-use-lower-fps",
+      "suggestedFrameProcessorFps": suggestedFps,
+    ])
+    lastSuggestedFrameProcessorFps = suggestedFps
   }
 }

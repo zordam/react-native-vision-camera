@@ -1,40 +1,45 @@
-import type { CameraCaptureError } from './CameraError'
-import type { TemporaryFile } from './TemporaryFile'
+import type { CameraCaptureError } from './CameraError';
+import type { TemporaryFile } from './TemporaryFile';
+
+export type VideoFileType = 'mov' | 'avci' | 'm4v' | 'mp4';
+
+export type CameraVideoCodec =
+  | 'h264'
+  | 'hevc'
+  | 'hevc-alpha'
+  | 'jpeg'
+  | 'pro-res-4444'
+  | 'pro-res-422'
+  | 'pro-res-422-hq'
+  | 'pro-res-422-lt'
+  | 'pro-res-422-proxy';
 
 export interface RecordVideoOptions {
   /**
    * Set the video flash mode. Natively, this just enables the torch while recording.
    */
-  flash?: 'on' | 'off'
+  flash?: 'on' | 'off' | 'auto';
   /**
-   * Specifies the output file type to record videos into.
+   * Sets the file type to use for the Video Recording.
+   * @default "mov"
    */
-  fileType?: 'mov' | 'mp4'
+  fileType?: VideoFileType;
   /**
    * Called when there was an unexpected runtime error while recording the video.
    */
-  onRecordingError: (error: CameraCaptureError) => void
+  onRecordingError: (error: CameraCaptureError) => void;
   /**
    * Called when the recording has been successfully saved to file.
    */
-  onRecordingFinished: (video: VideoFile) => void
+  onRecordingFinished: (video: VideoFile) => void;
   /**
-   * The Video Codec to record in.
-   * - `h264`: Widely supported, but might be less efficient, especially with larger sizes or framerates.
-   * - `h265`: The HEVC (High-Efficient-Video-Codec) for higher efficient video recordings.
+   * Set the video codec to record in. Different video codecs affect video quality and video size.
+   * To get a list of all available video codecs use the `getAvailableVideoCodecs()` function.
+   *
+   * @default undefined
+   * @platform iOS
    */
-  videoCodec?: 'h264' | 'h265'
-  /**
-   * The bit-rate for encoding the video into a file, in Mbps (Megabits per second).
-   *
-   * Bit-rate is dependant on various factors such as resolution, FPS, pixel format (whether it's 10 bit HDR or not), and codec.
-   *
-   * By default, it will be calculated using those factors.
-   * For example, at 1080p, 30 FPS, H.264 codec, without HDR it will result to 10 Mbps.
-   *
-   * @default 'normal'
-   */
-  videoBitRate?: 'low' | 'normal' | 'high' | number
+  videoCodec?: CameraVideoCodec;
 }
 
 /**
@@ -46,5 +51,5 @@ export interface VideoFile extends TemporaryFile {
   /**
    * Represents the duration of the video, in seconds.
    */
-  duration: number
+  duration: number;
 }

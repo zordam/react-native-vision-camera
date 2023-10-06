@@ -1,31 +1,25 @@
-import type { ViewProps } from 'react-native'
-import type { CameraDevice, CameraDeviceFormat, VideoStabilizationMode } from './CameraDevice'
-import type { CameraRuntimeError } from './CameraError'
-import { CodeScanner } from './CodeScanner'
-import type { Frame } from './Frame'
-import type { Orientation } from './Orientation'
+import type { ViewProps } from 'react-native';
+import type { CameraDevice, CameraDeviceFormat, ColorSpace, VideoStabilizationMode } from './CameraDevice';
+import type { CameraRuntimeError } from './CameraError';
+import type { CameraPreset } from './CameraPreset';
+import type { Frame } from './Frame';
 
-export type FrameProcessor = {
-  frameProcessor: (frame: Frame) => void
-  type: 'frame-processor'
+export interface FrameProcessorPerformanceSuggestion {
+  type: 'can-use-higher-fps' | 'should-use-lower-fps';
+  suggestedFrameProcessorFps: number;
 }
-
-// TODO: Replace `enableHighQualityPhotos: boolean` in favor of `priorization: 'photo' | 'video'`
-// TODO: Use RCT_ENUM_PARSER for stuff like torch, videoStabilizationMode, and orientation
-// TODO: Use Photo HostObject for stuff like depthData, portraitEffects, etc.
-// TODO: Add RAW capture support
 
 export interface CameraProps extends ViewProps {
   /**
    * The Camera Device to use.
    *
-   * See the [Camera Devices](https://react-native-vision-camera.com/docs/guides/devices) section in the documentation for more information about Camera Devices.
+   * See the [Camera Devices](https://mrousavy.github.io/react-native-vision-camera/docs/guides/devices) section in the documentation for more information about Camera Devices.
    *
    * @example
    * ```tsx
-   * const device = useCameraDevice('back')
+   * const devices = useCameraDevices('wide-angle-camera')
+   * const device = devices.back
    *
-   * if (device == null) return <NoCameraErrorView />
    * return (
    *   <Camera
    *     device={device}
@@ -35,45 +29,31 @@ export interface CameraProps extends ViewProps {
    * )
    * ```
    */
-  device: CameraDevice
+  device: CameraDevice;
   /**
-   * Whether the Camera should actively stream video frames, or not. See the [documentation about the `isActive` prop](https://react-native-vision-camera.com/docs/guides/lifecycle#the-isactive-prop) for more information.
+   * Whether the Camera should actively stream video frames, or not. See the [documentation about the `isActive` prop](https://mrousavy.github.io/react-native-vision-camera/docs/guides/lifecycle#the-isactive-prop) for more information.
    *
    * This can be compared to a Video component, where `isActive` specifies whether the video is paused or not.
    *
    * > Note: If you fully unmount the `<Camera>` component instead of using `isActive={false}`, the Camera will take a bit longer to start again. In return, it will use less resources since the Camera will be completely destroyed when unmounted.
    */
-  isActive: boolean
+  isActive: boolean;
 
   //#region Use-cases
   /**
-   * Enables **photo capture** with the `takePhoto` function (see ["Taking Photos"](https://react-native-vision-camera.com/docs/guides/taking-photos))
+   * Enables **photo capture** with the `takePhoto` function (see ["Taking Photos"](https://mrousavy.github.io/react-native-vision-camera/docs/guides/capturing#taking-photos))
    */
-  photo?: boolean
+  photo?: boolean;
   /**
-   * Enables **video capture** with the `startRecording` function (see ["Recording Videos"](https://react-native-vision-camera.com/docs/guides/recording-videos))
+   * Enables **video capture** with the `startRecording` function (see ["Recording Videos"](https://mrousavy.github.io/react-native-vision-camera/docs/guides/capturing/#recording-videos))
    *
-   * Note: If both the `photo` and `video` properties are enabled at the same time and the device is running at a `hardwareLevel` of `'legacy'` or `'limited'`, VisionCamera _might_ use a lower resolution for video capture due to hardware constraints.
+   * Note: If you want to use `video` and `frameProcessor` simultaneously, make sure [`supportsParallelVideoProcessing`](https://mrousavy.github.io/react-native-vision-camera/docs/guides/devices#the-supportsparallelvideoprocessing-prop) is `true`.
    */
-  video?: boolean
+  video?: boolean;
   /**
-   * Enables **audio capture** for video recordings (see ["Recording Videos"](https://react-native-vision-camera.com/docs/guides/recording-videos))
+   * Enables **audio capture** for video recordings (see ["Recording Videos"](https://mrousavy.github.io/react-native-vision-camera/docs/guides/capturing/#recording-videos))
    */
-  audio?: boolean
-  /**
-   * Specifies the pixel format for the video pipeline.
-   *
-   * Frames from a [Frame Processor](https://react-native-vision-camera.com/docs/guides/frame-processors) will be streamed in the pixel format specified here.
-   *
-   * While `native` and `yuv` are the most efficient formats, some ML models (such as MLKit Barcode detection) require input Frames to be in RGB colorspace, otherwise they just output nonsense.
-   *
-   * - `native`: The hardware native GPU buffer format. This is the most efficient format. (`PRIVATE` on Android, sometimes YUV on iOS)
-   * - `yuv`: The YUV (Y'CbCr 4:2:0 or NV21, 8-bit) format, either video- or full-range, depending on hardware capabilities. This is the second most efficient format.
-   * - `rgb`: The RGB (RGB, RGBA or ABGRA, 8-bit) format. This is least efficient and requires explicit conversion.
-   *
-   * @default `native`
-   */
-  pixelFormat?: 'native' | 'yuv' | 'rgb'
+  audio?: boolean;
   //#endregion
 
   //#region Common Props (torch, zoom)
@@ -84,7 +64,7 @@ export interface CameraProps extends ViewProps {
    *
    * @default "off"
    */
-  torch?: 'off' | 'on'
+  torch?: 'off' | 'on';
   /**
    * Specifies the zoom factor of the current camera, in "factor"/scale.
    *
@@ -96,75 +76,57 @@ export interface CameraProps extends ViewProps {
    *
    * @default 1.0
    */
-  zoom?: number
+  zoom?: number;
   /**
    * Enables or disables the native pinch to zoom gesture.
    *
-   * If you want to implement a custom zoom gesture, see [the Zooming with Reanimated documentation](https://react-native-vision-camera.com/docs/guides/animated).
+   * If you want to implement a custom zoom gesture, see [the Zooming with Reanimated documentation](https://mrousavy.github.io/react-native-vision-camera/docs/guides/animated).
    *
    * @default false
    */
-  enableZoomGesture?: boolean
+  enableZoomGesture?: boolean;
   //#endregion
 
   //#region Format/Preset selection
   /**
-   * Selects a given format. By default, the best matching format is chosen.
+   * Automatically selects a camera format which best matches the given preset. Must be `undefined` when `format` is set!
    */
-  format?: CameraDeviceFormat
+  preset?: CameraPreset;
   /**
-   * Specifies the Preview's resize mode.
-   * * `"cover"`: Keep aspect ratio and fill entire parent view (centered).
-   * * `"contain"`: Keep aspect ratio and make sure the entire content is visible inside the parent view, even if it introduces additional blank areas (centered).
-   *
-   * @default "cover"
+   * Selects a given format. Must be `undefined` when `preset` is set!
    */
-  resizeMode?: 'cover' | 'contain'
+  format?: CameraDeviceFormat;
   /**
    * Specify the frames per second this camera should use. Make sure the given `format` includes a frame rate range with the given `fps`.
    *
-   * Requires `format` to be set that supports the given `fps`.
+   * Requires `format` to be set.
    */
-  fps?: number
+  fps?: number;
   /**
    * Enables or disables HDR on this camera device. Make sure the given `format` supports HDR mode.
    *
-   * Requires `format` to be set that supports `photoHDR`/`videoHDR`.
+   * Requires `format` to be set.
    */
-  hdr?: boolean
-  /**
-   * Enables or disables lossless buffer compression for the video stream.
-   * If you only use {@linkcode video} or a {@linkcode frameProcessor}, this
-   * can increase the efficiency and lower memory usage of the Camera.
-   *
-   * If buffer compression is enabled, the video pipeline will try to use a
-   * lossless-compressed pixel format instead of the normal one.
-   *
-   * If you use a {@linkcode frameProcessor}, you might need to change how pixels
-   * are read inside your native frame processor function as this is different
-   * from the usual `yuv` or `rgb` layout.
-   *
-   * If buffer compression is not available but this property is enabled, the normal
-   * pixel formats will be used and no error will be thrown.
-   *
-   * @platform iOS
-   * @default
-   * - true // if video={true} and frameProcessor={undefined}
-   * - false // otherwise
-   */
-  enableBufferCompression?: boolean
+  hdr?: boolean;
   /**
    * Enables or disables low-light boost on this camera device. Make sure the given `format` supports low-light boost.
    *
-   * Requires a `format` to be set that supports `lowLightBoost`.
+   * Requires `format` to be set.
    */
-  lowLightBoost?: boolean
+  lowLightBoost?: boolean;
   /**
-   * Specifies the video stabilization mode to use.
+   * Specifies the color space to use for this camera device. Make sure the given `format` contains the given `colorSpace`.
    *
-   * Requires a `format` to be set that contains the given `videoStabilizationMode`.
+   * Requires `format` to be set.
    */
-  videoStabilizationMode?: VideoStabilizationMode
+  colorSpace?: ColorSpace;
+  /**
+   * Specifies the video stabilization mode to use for this camera device. Make sure the given `format` contains the given `videoStabilizationMode`.
+   *
+   * Requires `format` to be set.
+   * @platform iOS
+   */
+  videoStabilizationMode?: VideoStabilizationMode;
   //#endregion
 
   /**
@@ -172,7 +134,7 @@ export interface CameraProps extends ViewProps {
    *
    * @default false
    */
-  enableDepthData?: boolean
+  enableDepthData?: boolean;
   /**
    * A boolean specifying whether the photo render pipeline is prepared for portrait effects matte delivery.
    *
@@ -181,7 +143,7 @@ export interface CameraProps extends ViewProps {
    * @platform iOS 12.0+
    * @default false
    */
-  enablePortraitEffectsMatteDelivery?: boolean
+  enablePortraitEffectsMatteDelivery?: boolean;
   /**
    * Indicates whether the Camera should prepare the photo pipeline to provide maximum quality photos.
    *
@@ -193,61 +155,58 @@ export interface CameraProps extends ViewProps {
    *
    * @default false
    */
-  enableHighQualityPhotos?: boolean
-  /**
-   * If `true`, show a debug view to display the FPS of the Camera session.
-   * This is useful for debugging your Frame Processor's speed.
-   *
-   * @default false
-   */
-  enableFpsGraph?: boolean
+  enableHighQualityPhotos?: boolean;
   /**
    * Represents the orientation of all Camera Outputs (Photo, Video, and Frame Processor). If this value is not set, the device orientation is used.
    */
-  orientation?: Orientation
+  orientation?: 'portrait' | 'portraitUpsideDown' | 'landscapeLeft' | 'landscapeRight';
 
   //#region Events
   /**
    * Called when any kind of runtime error occured.
    */
-  onError?: (error: CameraRuntimeError) => void
+  onError?: (error: CameraRuntimeError) => void;
   /**
    * Called when the camera was successfully initialized.
    */
-  onInitialized?: () => void
+  onInitialized?: () => void;
   /**
-   * A worklet which will be called for every frame the Camera "sees".
+   * Called when a new performance suggestion for a Frame Processor is available - either if your Frame Processor is running too fast and frames are being dropped, or because it is able to run faster. Optionally, you can adjust your `frameProcessorFps` accordingly.
+   */
+  onFrameProcessorPerformanceSuggestionAvailable?: (suggestion: FrameProcessorPerformanceSuggestion) => void;
+  /**
+   * A worklet which will be called for every frame the Camera "sees". Throttle the Frame Processor's frame rate with {@linkcode frameProcessorFps}.
    *
-   * > See [the Frame Processors documentation](https://react-native-vision-camera.com/docs/guides/frame-processors) for more information
+   * > See [the Frame Processors documentation](https://mrousavy.github.io/react-native-vision-camera/docs/guides/frame-processors) for more information
+   *
+   * Note: If you want to use `video` and `frameProcessor` simultaneously, make sure [`supportsParallelVideoProcessing`](https://mrousavy.github.io/react-native-vision-camera/docs/guides/devices#the-supportsparallelvideoprocessing-prop) is `true`.
    *
    * @example
    * ```tsx
    * const frameProcessor = useFrameProcessor((frame) => {
    *   'worklet'
-   *   const faces = scanFaces(frame)
-   *   console.log(`Faces: ${faces}`)
+   *   const qrCodes = scanQRCodes(frame)
+   *   console.log(`Detected QR Codes: ${qrCodes}`)
    * }, [])
    *
    * return <Camera {...cameraProps} frameProcessor={frameProcessor} />
    * ```
    */
-  frameProcessor?: FrameProcessor
+  frameProcessor?: (frame: Frame) => void;
   /**
-   * A CodeScanner that can detect QR-Codes or Barcodes using platform-native APIs.
+   * Specifies the maximum frame rate the frame processor can use, independent of the Camera's frame rate (`fps` property).
    *
-   * > See [the Code Scanner documentation](https://react-native-vision-camera.com/docs/guides/code-scanning) for more information
+   * * A value of `'auto'` (default) indicates that the frame processor should execute as fast as it can, without dropping frames. This is achieved by collecting historical data for previous frame processor calls and adjusting frame rate accordingly.
+   * * A value of `1` indicates that the frame processor gets executed once per second, perfect for code scanning.
+   * * A value of `10` indicates that the frame processor gets executed 10 times per second, perfect for more realtime use-cases.
+   * * A value of `25` indicates that the frame processor gets executed 25 times per second, perfect for high-speed realtime use-cases.
+   * * ...and so on
    *
-   * @example
-   * ```tsx
-   * const codeScanner = useCodeScanner({
-   *   codeTypes: ['qr', 'ean-13'],
-   *   onCodeScanned: (codes) => {
-   *     console.log(`Scanned ${codes.length} codes!`)
-   *   }
-   * })
+   * If you're using higher values, always check your Xcode/Android Studio Logs to make sure your frame processors are executing fast enough
+   * without blocking the video recording queue.
    *
-   * return <Camera {...props} codeScanner={codeScanner} />
+   * @default 'auto'
    */
-  codeScanner?: CodeScanner
+  frameProcessorFps?: number | 'auto';
   //#endregion
 }

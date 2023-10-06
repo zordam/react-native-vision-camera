@@ -5,9 +5,11 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#import <RCTAppDelegate.h>
+#import <React/RCTBridgeDelegate.h>
 #import <UIKit/UIKit.h>
 
-@interface AppDelegate : RCTAppDelegate
+@interface AppDelegate : UIResponder <UIApplicationDelegate, RCTBridgeDelegate>
+
+@property (nonatomic, strong) UIWindow *window;
 
 @end

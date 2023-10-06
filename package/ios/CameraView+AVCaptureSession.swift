@@ -39,6 +39,28 @@ extension CameraView {
       captureSession.commitConfiguration()
     }
 
+    // If preset is set, use preset. Otherwise use format.
+    if let preset = preset {
+      var sessionPreset: AVCaptureSession.Preset?
+      do {
+        sessionPreset = try AVCaptureSession.Preset(withString: preset)
+      } catch let EnumParserError.unsupportedOS(supportedOnOS: os) {
+        invokeOnError(.parameter(.unsupportedOS(unionName: "Preset", receivedValue: preset, supportedOnOs: os)))
+        return
+      } catch {
+        invokeOnError(.parameter(.invalid(unionName: "Preset", receivedValue: preset)))
+        return
+      }
+      if sessionPreset != nil {
+        if captureSession.canSetSessionPreset(sessionPreset!) {
+          captureSession.sessionPreset = sessionPreset!
+        } else {
+          // non-fatal error, so continue with configuration
+          invokeOnError(.format(.invalidPreset(preset: preset)))
+        }
+      }
+    }
+
     // pragma MARK: Capture Session Inputs
     // Video Input
     do {
@@ -74,18 +96,14 @@ extension CameraView {
       photoOutput = AVCapturePhotoOutput()
 
       if enableHighQualityPhotos?.boolValue == true {
-        // TODO: In iOS 16 this will be removed in favor of maxPhotoDimensions.
         photoOutput!.isHighResolutionCaptureEnabled = true
         if #available(iOS 13.0, *) {
-          // TODO: Test if this actually does any fusion or if this just calls the captureOutput twice. If the latter, remove it.
           photoOutput!.isVirtualDeviceConstituentPhotoDeliveryEnabled = photoOutput!.isVirtualDeviceConstituentPhotoDeliverySupported
           photoOutput!.maxPhotoQualityPrioritization = .quality
         } else {
           photoOutput!.isDualCameraDualPhotoDeliveryEnabled = photoOutput!.isDualCameraDualPhotoDeliverySupported
         }
       }
-      // TODO: Enable isResponsiveCaptureEnabled? (iOS 17+)
-      // TODO: Enable isFastCapturePrioritizationEnabled? (iOS 17+)
       if enableDepthData {
         photoOutput!.isDepthDataDeliveryEnabled = photoOutput!.isDepthDataDeliverySupported
       }
@@ -114,143 +132,22 @@ extension CameraView {
         invokeOnError(.parameter(.unsupportedOutput(outputDescriptor: "video-output")))
         return
       }
-      videoOutput!.setSampleBufferDelegate(self, queue: CameraQueues.videoQueue)
+      videoOutput!.setSampleBufferDelegate(self, queue: videoQueue)
       videoOutput!.alwaysDiscardsLateVideoFrames = false
-
-      let pixelFormatType = getPixelFormat(videoOutput: videoOutput!)
-      videoOutput!.videoSettings = [
-        String(kCVPixelBufferPixelFormatTypeKey): pixelFormatType,
-      ]
       captureSession.addOutput(videoOutput!)
     }
 
-    // Code Scanner
-    if let codeScannerOptions = codeScannerOptions {
-      guard let codeScanner = try? CodeScanner(fromJsValue: codeScannerOptions) else {
-        invokeOnError(.parameter(.invalid(unionName: "codeScanner", receivedValue: codeScannerOptions.description)))
-        return
-      }
-      let metadataOutput = AVCaptureMetadataOutput()
-      guard captureSession.canAddOutput(metadataOutput) else {
-        invokeOnError(.codeScanner(.notCompatibleWithOutputs))
-        return
-      }
-      captureSession.addOutput(metadataOutput)
-
-      for codeType in codeScanner.codeTypes {
-        // swiftlint:disable:next for_where
-        if !metadataOutput.availableMetadataObjectTypes.contains(codeType) {
-          invokeOnError(.codeScanner(.codeTypeNotSupported(codeType: codeType.descriptor)))
-          return
-        }
-      }
-
-      metadataOutput.setMetadataObjectsDelegate(self, queue: CameraQueues.codeScannerQueue)
-      metadataOutput.metadataObjectTypes = codeScanner.codeTypes
-      if let rectOfInterest = codeScanner.regionOfInterest {
-        metadataOutput.rectOfInterest = rectOfInterest
-      }
-    }
-
-    if outputOrientation != .portrait {
-      updateOrientation()
-    }
+    onOrientationChanged()
 
     invokeOnInitialized()
     isReady = true
     ReactLogger.log(level: .info, message: "Session successfully configured!")
   }
 
-  /**
-   Returns the pixel format that should be used for the AVCaptureVideoDataOutput.
-   If HDR is enabled, this will return YUV 4:2:0 10-bit.
-   If HDR is disabled, this will return whatever the user specified as a pixelFormat, or the most efficient format as a fallback.
-   */
-  private func getPixelFormat(videoOutput: AVCaptureVideoDataOutput) -> OSType {
-    // as per documentation, the first value is always the most efficient format
-    var defaultFormat = videoOutput.availableVideoPixelFormatTypes.first!
-    if enableBufferCompression {
-      // use compressed format instead if we enabled buffer compression
-      if defaultFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange &&
-        videoOutput.availableVideoPixelFormatTypes.contains(kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarVideoRange) {
-        // YUV 4:2:0 8-bit (limited video colors; compressed)
-        defaultFormat = kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarVideoRange
-      }
-      if defaultFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange &&
-        videoOutput.availableVideoPixelFormatTypes.contains(kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange) {
-        // YUV 4:2:0 8-bit (full video colors; compressed)
-        defaultFormat = kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange
-      }
-    }
-
-    // If the user enabled HDR, we can only use the YUV 4:2:0 10-bit pixel format.
-    if hdr == true {
-      guard pixelFormat == nil || pixelFormat == "yuv" else {
-        invokeOnError(.format(.incompatiblePixelFormatWithHDR))
-        return defaultFormat
-      }
-
-      var targetFormats = [kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
-                           kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange]
-      if enableBufferCompression {
-        // If we enable buffer compression, try to use a lossless compressed YUV format first, otherwise fall back to the others.
-        targetFormats.insert(kCVPixelFormatType_Lossless_420YpCbCr10PackedBiPlanarVideoRange, at: 0)
-      }
-
-      // Find the best matching format
-      guard let format = videoOutput.findPixelFormat(firstOf: targetFormats) else {
-        invokeOnError(.format(.invalidHdr))
-        return defaultFormat
-      }
-      // YUV 4:2:0 10-bit (compressed/uncompressed)
-      return format
-    }
-
-    // If the user didn't specify a custom pixelFormat, just return the default one.
-    guard let pixelFormat = pixelFormat else {
-      return defaultFormat
-    }
-
-    // If we don't use HDR, we can use any other custom pixel format.
-    switch pixelFormat {
-    case "yuv":
-      // YUV 4:2:0 8-bit (full/limited video colors; uncompressed)
-      var targetFormats = [kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-                           kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
-      if enableBufferCompression {
-        // YUV 4:2:0 8-bit (full/limited video colors; compressed)
-        targetFormats.insert(kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarVideoRange, at: 0)
-        targetFormats.insert(kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange, at: 0)
-      }
-      guard let format = videoOutput.findPixelFormat(firstOf: targetFormats) else {
-        invokeOnError(.device(.pixelFormatNotSupported))
-        return defaultFormat
-      }
-      return format
-    case "rgb":
-      // RGBA 8-bit (uncompressed)
-      var targetFormats = [kCVPixelFormatType_32BGRA]
-      if enableBufferCompression {
-        // RGBA 8-bit (compressed)
-        targetFormats.insert(kCVPixelFormatType_Lossless_32BGRA, at: 0)
-      }
-      guard let format = videoOutput.findPixelFormat(firstOf: targetFormats) else {
-        invokeOnError(.device(.pixelFormatNotSupported))
-        return defaultFormat
-      }
-      return format
-    case "native":
-      return defaultFormat
-    default:
-      invokeOnError(.parameter(.invalid(unionName: "pixelFormat", receivedValue: pixelFormat as String)))
-      return defaultFormat
-    }
-  }
-
   // pragma MARK: Configure Device
 
   /**
-   Configures the Video Device with the given FPS and HDR modes.
+   Configures the Video Device with the given FPS, HDR and ColorSpace.
    */
   final func configureDevice() {
     ReactLogger.log(level: .info, message: "Configuring Device...")
@@ -278,6 +175,17 @@ extension CameraView {
         device.activeVideoMinFrameDuration = CMTime.invalid
         device.activeVideoMaxFrameDuration = CMTime.invalid
       }
+      if hdr != nil {
+        if hdr == true && !device.activeFormat.isVideoHDRSupported {
+          invokeOnError(.format(.invalidHdr))
+          return
+        }
+        if !device.automaticallyAdjustsVideoHDREnabled {
+          if device.isVideoHDREnabled != hdr!.boolValue {
+            device.isVideoHDREnabled = hdr!.boolValue
+          }
+        }
+      }
       if lowLightBoost != nil {
         if lowLightBoost == true && !device.isLowLightBoostSupported {
           invokeOnError(.device(.lowLightBoostNotSupported))
@@ -286,6 +194,14 @@ extension CameraView {
         if device.automaticallyEnablesLowLightBoostWhenAvailable != lowLightBoost!.boolValue {
           device.automaticallyEnablesLowLightBoostWhenAvailable = lowLightBoost!.boolValue
         }
+      }
+      if let colorSpace = colorSpace as String? {
+        guard let avColorSpace = try? AVCaptureColorSpace(string: colorSpace),
+              device.activeFormat.supportedColorSpaces.contains(avColorSpace) else {
+          invokeOnError(.format(.invalidColorSpace(colorSpace: colorSpace)))
+          return
+        }
+        device.activeColorSpace = avColorSpace
       }
 
       device.unlockForConfiguration()
@@ -348,7 +264,7 @@ extension CameraView {
 
     if isActive {
       // restart capture session after an error occured
-      CameraQueues.cameraQueue.async {
+      cameraQueue.async {
         self.captureSession.startRunning()
       }
     }

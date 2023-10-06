@@ -8,9 +8,23 @@
 
 import AVFoundation
 
+// MARK: - TakePhotoOptions
+
+struct TakePhotoOptions {
+  init(fromDictionary dictionary: NSDictionary) {
+    if let videoCodec = dictionary.value(forKey: "videoCodec") as? String {
+      self.videoCodec = AVVideoCodecType(withString: videoCodec)
+    }
+    qualityPrioritization = dictionary.value(forKey: "qualityPrioritization") as? String
+  }
+
+  var videoCodec: AVVideoCodecType?
+  var qualityPrioritization: String?
+}
+
 extension CameraView {
   func takePhoto(options: NSDictionary, promise: Promise) {
-    CameraQueues.cameraQueue.async {
+    cameraQueue.async {
       guard let photoOutput = self.photoOutput,
             let videoDeviceInput = self.videoDeviceInput else {
         if self.photo?.boolValue == true {
@@ -24,12 +38,26 @@ extension CameraView {
 
       ReactLogger.log(level: .info, message: "Capturing photo...")
 
+      var format: [String: Any]?
+      // photo codec
+      if let photoCodecString = options["photoCodec"] as? String {
+        guard let photoCodec = AVVideoCodecType(withString: photoCodecString) else {
+          promise.reject(error: .parameter(.invalid(unionName: "PhotoCodec", receivedValue: photoCodecString)))
+          return
+        }
+        if photoOutput.availablePhotoCodecTypes.contains(photoCodec) {
+          format = [AVVideoCodecKey: photoCodec]
+        } else {
+          promise.reject(error: .capture(.invalidPhotoCodec))
+          return
+        }
+      }
+
       // Create photo settings
-      let photoSettings = AVCapturePhotoSettings()
+      let photoSettings = AVCapturePhotoSettings(format: format)
 
       // default, overridable settings if high quality capture was enabled
       if self.enableHighQualityPhotos?.boolValue == true {
-        // TODO: On iOS 16+ this will be removed in favor of maxPhotoDimensions.
         photoSettings.isHighResolutionPhotoEnabled = true
         if #available(iOS 13.0, *) {
           photoSettings.photoQualityPrioritization = .quality
@@ -44,9 +72,6 @@ extension CameraView {
         }
         photoSettings.flashMode = flashMode
       }
-
-      // shutter sound
-      let enableShutterSound = options["enableShutterSound"] as? Bool ?? true
 
       // depth data
       photoSettings.isDepthDataDeliveryEnabled = photoOutput.isDepthDataDeliveryEnabled
@@ -78,7 +103,7 @@ extension CameraView {
         photoSettings.isAutoContentAwareDistortionCorrectionEnabled = enableAutoDistortionCorrection
       }
 
-      photoOutput.capturePhoto(with: photoSettings, delegate: PhotoCaptureDelegate(promise: promise, enableShutterSound: enableShutterSound))
+      photoOutput.capturePhoto(with: photoSettings, delegate: PhotoCaptureDelegate(promise: promise))
 
       // Assume that `takePhoto` is always called with the same parameters, so prepare the next call too.
       photoOutput.setPreparedPhotoSettingsArray([photoSettings], completionHandler: nil)

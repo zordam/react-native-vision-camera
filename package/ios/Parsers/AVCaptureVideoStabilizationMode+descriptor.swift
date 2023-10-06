@@ -22,8 +22,7 @@ extension AVCaptureVideoStabilizationMode {
         self = .cinematicExtended
         return
       } else {
-        self = .cinematic
-        return
+        throw EnumParserError.unsupportedOS(supportedOnOS: "iOS 13.0")
       }
     case "off":
       self = .off

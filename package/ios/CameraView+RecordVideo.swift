@@ -15,7 +15,7 @@ extension CameraView: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAud
    Starts a video + audio recording with a custom Asset Writer.
    */
   func startRecording(options: NSDictionary, callback jsCallbackFunc: @escaping RCTResponseSenderBlock) {
-    CameraQueues.cameraQueue.async {
+    cameraQueue.async {
       ReactLogger.log(level: .info, message: "Starting Video recording...")
       let callback = Callback(jsCallbackFunc)
 
@@ -67,7 +67,7 @@ extension CameraView: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAud
       let onFinish = { (recordingSession: RecordingSession, status: AVAssetWriter.Status, error: Error?) in
         defer {
           if enableAudio {
-            CameraQueues.audioQueue.async {
+            self.audioQueue.async {
               self.deactivateAudioSession()
             }
           }
@@ -116,18 +116,10 @@ extension CameraView: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAud
       }
 
       // Init Video
-      guard var videoSettings = self.recommendedVideoSettings(videoOutput: videoOutput, fileType: fileType, videoCodec: videoCodec),
+      guard let videoSettings = self.recommendedVideoSettings(videoOutput: videoOutput, fileType: fileType, videoCodec: videoCodec),
             !videoSettings.isEmpty else {
         callback.reject(error: .capture(.createRecorderError(message: "Failed to get video settings!")))
         return
-      }
-
-      // Custom Video Bit Rate (Mbps -> bps)
-      if let videoBitRate = options["videoBitRate"] as? NSNumber {
-        let bitsPerSecond = videoBitRate.doubleValue * 1_000_000
-        videoSettings[AVVideoCompressionPropertiesKey] = [
-          AVVideoAverageBitRateKey: NSNumber(value: bitsPerSecond),
-        ]
       }
 
       // get pixel format (420f, 420v, x420)
@@ -135,12 +127,10 @@ extension CameraView: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAud
       recordingSession.initializeVideoWriter(withSettings: videoSettings,
                                              pixelFormat: pixelFormat)
 
-      // Init Audio (optional)
+      // Init Audio (optional, async)
       if enableAudio {
-        // Activate Audio Session asynchronously
-        CameraQueues.audioQueue.async {
-          self.activateAudioSession()
-        }
+        // Activate Audio Session (blocking)
+        self.activateAudioSession()
 
         if let audioOutput = self.audioOutput,
            let audioSettings = audioOutput.recommendedAudioSettingsForAssetWriter(writingTo: fileType) {
@@ -160,7 +150,7 @@ extension CameraView: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAud
   }
 
   func stopRecording(promise: Promise) {
-    CameraQueues.cameraQueue.async {
+    cameraQueue.async {
       self.isRecording = false
 
       withPromise(promise) {
@@ -174,7 +164,7 @@ extension CameraView: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAud
   }
 
   func pauseRecording(promise: Promise) {
-    CameraQueues.cameraQueue.async {
+    cameraQueue.async {
       withPromise(promise) {
         guard self.recordingSession != nil else {
           // there's no active recording!
@@ -187,7 +177,7 @@ extension CameraView: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAud
   }
 
   func resumeRecording(promise: Promise) {
-    CameraQueues.cameraQueue.async {
+    cameraQueue.async {
       withPromise(promise) {
         guard self.recordingSession != nil else {
           // there's no active recording!
@@ -200,17 +190,7 @@ extension CameraView: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAud
   }
 
   public final func captureOutput(_ captureOutput: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from _: AVCaptureConnection) {
-    #if VISION_CAMERA_ENABLE_FRAME_PROCESSORS
-      if captureOutput is AVCaptureVideoDataOutput {
-        if let frameProcessor = frameProcessor {
-          // Call Frame Processor
-          let frame = Frame(buffer: sampleBuffer, orientation: bufferOrientation)
-          frameProcessor.call(frame)
-        }
-      }
-    #endif
-
-    // Record Video Frame/Audio Sample to File
+    // Video Recording runs in the same queue
     if isRecording {
       guard let recordingSession = recordingSession else {
         invokeOnError(.capture(.unknown(message: "isRecording was true but the RecordingSession was null!")))
@@ -222,29 +202,67 @@ extension CameraView: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAud
         recordingSession.appendBuffer(sampleBuffer, type: .video, timestamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
       case is AVCaptureAudioDataOutput:
         let timestamp = CMSyncConvertTime(CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
-                                          from: audioCaptureSession.masterClock ?? CMClockGetHostTimeClock(),
-                                          to: captureSession.masterClock ?? CMClockGetHostTimeClock())
+                                          from: audioCaptureSession.masterClock!,
+                                          to: captureSession.masterClock!)
         recordingSession.appendBuffer(sampleBuffer, type: .audio, timestamp: timestamp)
       default:
         break
       }
     }
 
-    #if DEBUG
-      if captureOutput is AVCaptureVideoDataOutput {
-        // Update FPS Graph per Frame
-        if let fpsGraph = fpsGraph {
-          DispatchQueue.main.async {
-            fpsGraph.onTick(CACurrentMediaTime())
+    if let frameProcessor = frameProcessorCallback, captureOutput is AVCaptureVideoDataOutput {
+      // check if last frame was x nanoseconds ago, effectively throttling FPS
+      let frameTime = UInt64(CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds * 1_000_000_000.0)
+      let lastFrameProcessorCallElapsedTime = frameTime - lastFrameProcessorCall
+      let secondsPerFrame = 1.0 / actualFrameProcessorFps
+      let nanosecondsPerFrame = secondsPerFrame * 1_000_000_000.0
+      if lastFrameProcessorCallElapsedTime >= UInt64(nanosecondsPerFrame) {
+        if !isRunningFrameProcessor {
+          // we're not in the middle of executing the Frame Processor, so prepare for next call.
+          CameraQueues.frameProcessorQueue.async {
+            self.isRunningFrameProcessor = true
+
+            let perfSample = self.frameProcessorPerformanceDataCollector.beginPerformanceSampleCollection()
+            let frame = Frame(buffer: sampleBuffer, orientation: self.bufferOrientation)
+            frameProcessor(frame)
+            perfSample.endPerformanceSampleCollection()
+
+            self.isRunningFrameProcessor = false
           }
+          lastFrameProcessorCall = frameTime
+        } else {
+          // we're still in the middle of executing a Frame Processor for a previous frame, so a frame was dropped.
+          ReactLogger.log(level: .warning, message: "The Frame Processor took so long to execute that a frame was dropped.")
         }
       }
-    #endif
+
+      if isReadyForNewEvaluation {
+        // last evaluation was more than 1sec ago, evaluate again
+        evaluateNewPerformanceSamples()
+      }
+    }
   }
 
-  private func recommendedVideoSettings(videoOutput: AVCaptureVideoDataOutput,
-                                        fileType: AVFileType,
-                                        videoCodec: AVVideoCodecType?) -> [String: Any]? {
+  private func evaluateNewPerformanceSamples() {
+    lastFrameProcessorPerformanceEvaluation = DispatchTime.now()
+    guard let videoDevice = videoDeviceInput?.device else { return }
+    guard frameProcessorPerformanceDataCollector.hasEnoughData else { return }
+
+    let maxFrameProcessorFps = Double(videoDevice.activeVideoMinFrameDuration.timescale) * Double(videoDevice.activeVideoMinFrameDuration.value)
+    let averageFps = 1.0 / frameProcessorPerformanceDataCollector.averageExecutionTimeSeconds
+    let suggestedFrameProcessorFps = max(floor(min(averageFps, maxFrameProcessorFps)), 1)
+
+    if frameProcessorFps.intValue == -1 {
+      // frameProcessorFps="auto"
+      actualFrameProcessorFps = suggestedFrameProcessorFps
+    } else {
+      // frameProcessorFps={someCustomFpsValue}
+      invokeOnFrameProcessorPerformanceSuggestionAvailable(currentFps: frameProcessorFps.doubleValue,
+                                                           suggestedFps: suggestedFrameProcessorFps)
+    }
+  }
+
+  private func recommendedVideoSettings(videoOutput: AVCaptureVideoDataOutput, fileType: AVFileType, videoCodec: AVVideoCodecType?) -> [String: Any]? {
     if videoCodec != nil {
       return videoOutput.recommendedVideoSettings(forVideoCodecType: videoCodec!, assetWriterOutputFileType: fileType)
     } else {
@@ -252,25 +270,34 @@ extension CameraView: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAud
     }
   }
 
+  private var isReadyForNewEvaluation: Bool {
+    let lastPerformanceEvaluationElapsedTime = DispatchTime.now().uptimeNanoseconds - lastFrameProcessorPerformanceEvaluation.uptimeNanoseconds
+    return lastPerformanceEvaluationElapsedTime > 1_000_000_000
+  }
+
   /**
    Gets the orientation of the CameraView's images (CMSampleBuffers).
    */
-  private var bufferOrientation: UIImage.Orientation {
+  var bufferOrientation: UIImage.Orientation {
     guard let cameraPosition = videoDeviceInput?.device.position else {
       return .up
     }
 
-    switch outputOrientation {
+    switch UIDevice.current.orientation {
     case .portrait:
       return cameraPosition == .front ? .leftMirrored : .right
+
     case .landscapeLeft:
       return cameraPosition == .front ? .downMirrored : .up
+
     case .portraitUpsideDown:
       return cameraPosition == .front ? .rightMirrored : .left
+
     case .landscapeRight:
       return cameraPosition == .front ? .upMirrored : .down
-    case .unknown:
-      return .up
+
+    case .unknown, .faceUp, .faceDown:
+      fallthrough
     @unknown default:
       return .up
     }

@@ -1,46 +1,36 @@
 package com.mrousavy.camera.example;
 
-import android.media.Image;
 import android.util.Log;
-
-import com.mrousavy.camera.frameprocessor.Frame;
+import androidx.camera.core.ImageProxy;
+import com.facebook.react.bridge.WritableNativeArray;
+import com.facebook.react.bridge.WritableNativeMap;
 import com.mrousavy.camera.frameprocessor.FrameProcessorPlugin;
 import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
-
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
 
 public class ExampleFrameProcessorPlugin extends FrameProcessorPlugin {
     @Override
-    public Object callback(@NotNull Frame frame, @Nullable Map<String, Object> params) {
-        if (params == null) return null;
-        Image image = frame.getImage();
+    public Object callback(@NotNull ImageProxy image, @NotNull Object[] params) {
+        Log.d("ExamplePlugin", image.getWidth() + " x " + image.getHeight() + " Image with format #" + image.getFormat() + ". Logging " + params.length + " parameters:");
 
-        Log.d("ExamplePlugin", image.getWidth() + " x " + image.getHeight() + " Image with format #" + image.getFormat() + ". Logging " + params.size() + " parameters:");
-
-        for (String key : params.keySet()) {
-            Object value = params.get(key);
-            Log.d("ExamplePlugin", "  -> " + (value == null ? "(null)" : value + " (" + value.getClass().getName() + ")"));
+        for (Object param : params) {
+            Log.d("ExamplePlugin", "  -> " + (param == null ? "(null)" : param.toString() + " (" + param.getClass().getName() + ")"));
         }
 
-        Map<String, Object> map = new HashMap<>();
-        map.put("example_str", "Test");
-        map.put("example_bool", true);
-        map.put("example_double", 5.3);
+        WritableNativeMap map = new WritableNativeMap();
+        map.putString("example_str", "Test");
+        map.putBoolean("example_bool", true);
+        map.putDouble("example_double", 5.3);
 
-        List<Object> array = new ArrayList<>();
-        array.add("Hello!");
-        array.add(true);
-        array.add(17.38);
+        WritableNativeArray array = new WritableNativeArray();
+        array.pushString("Hello!");
+        array.pushBoolean(true);
+        array.pushDouble(17.38);
 
-        map.put("example_array", array);
+        map.putArray("example_array", array);
         return map;
     }
 
     ExampleFrameProcessorPlugin() {
-
+        super("example_plugin");
     }
 }

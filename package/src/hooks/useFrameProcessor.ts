@@ -1,37 +1,14 @@
-import { DependencyList, useMemo } from 'react'
-import type { Frame, FrameInternal } from '../Frame'
-import { FrameProcessor } from '../CameraProps'
+/* global _setGlobalConsole */
+
+import { DependencyList, useCallback } from 'react';
+import type { Frame } from '../Frame';
+
+type FrameProcessor = (frame: Frame) => void;
+
+const capturableConsole = console;
 
 /**
- * Create a new Frame Processor function which you can pass to the `<Camera>`.
- * (See ["Frame Processors"](https://react-native-vision-camera.com/docs/guides/frame-processors))
- *
- * Make sure to add the `'worklet'` directive to the top of the Frame Processor function, otherwise it will not get compiled into a worklet.
- *
- * Also make sure to memoize the returned object, so that the Camera doesn't reset the Frame Processor Context each time.
- */
-export function createFrameProcessor(frameProcessor: FrameProcessor['frameProcessor'], type: FrameProcessor['type']): FrameProcessor {
-  return {
-    frameProcessor: (frame: Frame) => {
-      'worklet'
-      // Increment ref-count by one
-      const internal = frame as FrameInternal
-      internal.incrementRefCount()
-      try {
-        // Call sync frame processor
-        frameProcessor(frame)
-      } finally {
-        // Potentially delete Frame if we were the last ref (no runAsync)
-        internal.decrementRefCount()
-      }
-    },
-    type: type,
-  }
-}
-
-/**
- * Returns a memoized Frame Processor function wich you can pass to the `<Camera>`.
- * (See ["Frame Processors"](https://react-native-vision-camera.com/docs/guides/frame-processors))
+ * Returns a memoized Frame Processor function wich you can pass to the `<Camera>`. (See ["Frame Processors"](https://mrousavy.github.io/react-native-vision-camera/docs/guides/frame-processors))
  *
  * Make sure to add the `'worklet'` directive to the top of the Frame Processor function, otherwise it will not get compiled into a worklet.
  *
@@ -42,12 +19,41 @@ export function createFrameProcessor(frameProcessor: FrameProcessor['frameProces
  * ```ts
  * const frameProcessor = useFrameProcessor((frame) => {
  *   'worklet'
- *   const faces = scanFaces(frame)
- *   console.log(`Faces: ${faces}`)
+ *   const qrCodes = scanQRCodes(frame)
+ *   console.log(`QR Codes: ${qrCodes}`)
  * }, [])
  * ```
  */
-export function useFrameProcessor(frameProcessor: (frame: Frame) => void, dependencies: DependencyList): FrameProcessor {
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  return useMemo(() => createFrameProcessor(frameProcessor, 'frame-processor'), dependencies)
+export function useFrameProcessor(frameProcessor: FrameProcessor, dependencies: DependencyList): FrameProcessor {
+  return useCallback((frame: Frame) => {
+    'worklet';
+
+    // @ts-expect-error
+    if (global.didSetConsole == null || global.didSetConsole === false) {
+      const console = {
+        // @ts-expect-error __callAsync is injected by native REA
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        debug: capturableConsole.debug.__callAsync,
+        // @ts-expect-error __callAsync is injected by native REA
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        log: capturableConsole.log.__callAsync,
+        // @ts-expect-error __callAsync is injected by native REA
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        warn: capturableConsole.warn.__callAsync,
+        // @ts-expect-error __callAsync is injected by native REA
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        error: capturableConsole.error.__callAsync,
+        // @ts-expect-error __callAsync is injected by native REA
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+        info: capturableConsole.info.__callAsync,
+      };
+      // @ts-expect-error _setGlobalConsole is set by RuntimeDecorator::decorateRuntime
+      _setGlobalConsole(console);
+      // @ts-expect-error
+      global.didSetConsole = true;
+    }
+
+    frameProcessor(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, dependencies);
 }
